@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+base64 = "0.13.0"
 bincode = "1.3.3"
 bonbon = { path = "../bonbon" }
 bs58 = { git = "https://github.com/lwus/bs58-rs" }

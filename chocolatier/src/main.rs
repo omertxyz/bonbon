@@ -2,7 +2,11 @@ use {
     log::*,
     postgres::fallible_iterator::FallibleIterator,
     prost::Message,
-    solana_sdk::clock::Slot,
+    solana_sdk::{
+        clock::Slot,
+        instruction::CompiledInstruction,
+        pubkey::Pubkey,
+    },
     solana_storage_proto::convert::generated,
     solana_transaction_status::TransactionWithStatusMeta,
 };
@@ -206,6 +210,89 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    use bonbon::assemble::*;
+    let mut psql_client = postgres::Client::connect(
+        config.psql_config.as_str(), postgres::NoTls)?;
+
+    let mut partition_client = postgres::Client::connect(
+        config.psql_config.as_str(), postgres::NoTls)?;
+
+    let select_all_token_mints_statement = psql_client.prepare(
+        "SELECT DISTINCT partition_key
+         FROM partitions
+         WHERE program_key = decode($1, 'base64')
+        ",
+    )?;
+
+    let select_partition_key = partition_client.prepare(
+        "SELECT p.signature, p.instruction, a.keys
+         FROM partitions p JOIN account_keys a ON p.signature = a.signature
+         WHERE partition_key = decode($1, 'base64')
+            OR partition_key = decode($2, 'base64')
+         ORDER BY (slot, block_index, outer_index, inner_index)
+        ",
+    )?;
+
+    let spl_token_id_encoded = base64::encode(spl_token::id());
+    let params: &[&str] = &[&spl_token_id_encoded];
+    let mut it = psql_client.query_raw(
+        &select_all_token_mints_statement,
+        params,
+    )?;
+
+    let updaters = [
+        BonbonUpdater {
+            update: update_token_instruction,
+            program_id: spl_token::id(),
+        },
+        BonbonUpdater {
+            update: update_metadata_instruction,
+            program_id: mpl_token_metadata::id(),
+        },
+    ];
+
+    while let Some(row) = it.next()? {
+        let mint_key = Pubkey::new(row.get(0));
+        let metadata_key = mpl_token_metadata::pda::find_metadata_account(&mint_key).0;
+
+        let mint_key_encoded = base64::encode(&mint_key);
+        let metadata_key_encoded = base64::encode(&metadata_key);
+        let instructions = partition_client.query(
+            &select_partition_key,
+            &[&mint_key_encoded, &metadata_key_encoded],
+        )?;
+
+        let mut bonbon = bonbon::assemble::Bonbon::default();
+        let mut update_err = None;
+        for row in instructions {
+            let instruction = bincode::deserialize
+                ::<CompiledInstruction>(&row.get::<_, Vec<u8>>(1))?;
+            let keys: Vec<Vec<u8>> = row.get(2);
+            let keys = keys.into_iter().map(|k| Pubkey::new(&k)).collect::<Vec<_>>();
+
+            match bonbon.update(&instruction, &keys, &updaters) {
+                Ok(_) => {}
+                Err(err) => {
+                    update_err = Some(err);
+                    break;
+                }
+            }
+        }
+
+        if let Some(err) = update_err {
+            warn!("failed to make bonbon {}: {:?}",
+                  mint_key, err);
+        } else {
+            trace!("made bonbon {:?}", bonbon);
+        }
+
+        break;
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_file_default = "bonbon.log";
 
@@ -253,6 +340,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             clap::Command::new("partition")
             .about("Partition all transactions found in the DB")
         )
+        .subcommand(
+            clap::Command::new("reassemble")
+            .about("Reassemble all partitioned keys found in the DB")
+        )
         .get_matches();
 
     let config = Config {
@@ -280,6 +371,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .level(log::LevelFilter::Debug)
         // we do a lot of logging at trace
         .level_for("chocolatier", log::LevelFilter::Trace)
+        .level_for("bonbon", log::LevelFilter::Trace)
         // postgres is a bit too verbose about queries so info
         .level_for("postgres", log::LevelFilter::Info)
         .level_for("tokio_postgres", log::LevelFilter::Info)
@@ -308,6 +400,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(("partition", _)) => {
             partition(&config)?;
+        }
+        Some(("reassemble", _)) => {
+            reassemble(&config)?;
         }
         o => {
             warn!("No matching subcommand found {:?}", o);
