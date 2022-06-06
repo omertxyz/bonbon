@@ -8,15 +8,22 @@ use {
         message::{VersionedMessage, AccountKeys},
         pubkey::Pubkey,
     },
-    solana_transaction_status::TransactionWithStatusMeta,
+    solana_transaction_status::{
+        TransactionWithStatusMeta,
+        TransactionTokenBalance,
+    },
+    std::collections::HashMap,
 };
 
+#[derive(Debug)]
 pub struct TransactionTokenMeta {
     pub account_index: u8,
 
     pub decimals: u8,
 
-    pub amount: StringAmount,
+    pub pre_amount: Option<StringAmount>,
+
+    pub post_amount: Option<StringAmount>,
 
     pub mint_key: Pubkey,
 }
@@ -46,10 +53,15 @@ pub fn partition_token_instruction(
 
     // TODO: less jank. filter/parse all these upfront?
     let heuristic_token_meta_ok = |meta: &TransactionTokenMeta| {
-        meta.decimals == 0
-            && meta.amount.len() == 1
-            && (meta.amount.as_bytes()[0] == 0x30 // 0
-                || meta.amount.as_bytes()[0] == 0x31) // or 1
+        let amount_ok = |amount: &Option<StringAmount>| {
+            match amount {
+                Some(amount) => amount.len() == 1
+                    && (amount.as_bytes()[0] == 0x30 // 0
+                        || amount.as_bytes()[0] == 0x31), // or 1
+                None => true,
+            }
+        };
+        meta.decimals == 0 && amount_ok(&meta.pre_amount) && amount_ok(&meta.post_amount)
     };
 
     let token_account_mint_key = |index| -> Result<Option<Pubkey>, ErrorCode> {
@@ -303,16 +315,30 @@ pub fn partition_transaction(
         .ok_or(ErrorCode::MissingTransactionStatusMeta)?;
 
     let account_keys = &transaction.account_keys();
-    let token_metas = &status_meta.pre_token_balances.unwrap_or(vec![])
-        .into_iter()
-        .map(|b| Ok(TransactionTokenMeta {
-            account_index: b.account_index,
-            decimals: b.ui_token_amount.decimals,
-            amount: b.ui_token_amount.amount,
-            mint_key: Pubkey::new(bs58::decode(b.mint).into_vec()
-                .map_err(|_| ErrorCode::BadPubkeyString)?.as_slice()),
-        }))
-        .collect::<Result<Vec<_>, ErrorCode>>()?;
+
+    let meta_from_balance = |b: &TransactionTokenBalance| Ok(TransactionTokenMeta {
+        account_index: b.account_index,
+        decimals: b.ui_token_amount.decimals,
+        pre_amount: None,
+        post_amount: None,
+        mint_key: Pubkey::new(bs58::decode(b.mint.clone()).into_vec()
+            .map_err(|_| ErrorCode::BadPubkeyString)?.as_slice()),
+    });
+
+    let mut token_metas = HashMap::new();
+    for balance in status_meta.pre_token_balances.into_iter().flatten() {
+        let token_meta = meta_from_balance(&balance)?;
+        let meta = token_metas.entry(balance.account_index).or_insert(token_meta);
+        meta.pre_amount = Some(balance.ui_token_amount.amount);
+    }
+
+    for balance in status_meta.post_token_balances.into_iter().flatten() {
+        let token_meta = meta_from_balance(&balance)?;
+        let meta = token_metas.entry(balance.account_index).or_insert(token_meta);
+        meta.post_amount = Some(balance.ui_token_amount.amount);
+    }
+
+    let token_metas = &token_metas.into_values().collect::<Vec<_>>();
 
     let mut partitioned = vec![];
     let mut try_partition_instruction = |
