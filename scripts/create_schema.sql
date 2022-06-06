@@ -21,3 +21,41 @@ CREATE TABLE account_keys (
   signature BYTEA PRIMARY KEY,
   keys BYTEA[]
 );
+
+
+CREATE TYPE edition_status AS enum (
+  'none',
+  'master',
+  'limited'
+);
+
+CREATE TYPE limited_edition AS (
+  master_key BYTEA,
+  -- u64 but close enough...
+  edition_num BIGINT
+);
+
+CREATE TABLE bonbons (
+  metadata_key BYTEA NOT NULL,
+  mint_key BYTEA NOT NULL,
+  edition_status edition_status NOT NULL,
+  limited_edition limited_edition,
+  uri BYTEA
+);
+
+CREATE TABLE creators (
+  creator_key BYTEA NOT NULL,
+  metadata_key BYTEA NOT NULL,
+  verified BOOLEAN,
+  share SMALLINT,
+
+  UNIQUE (creator_key, metadata_key)
+);
+
+CREATE TABLE collections (
+  collection_key BYTEA NOT NULL,
+  metadata_key BYTEA NOT NULL,
+  verified BOOLEAN,
+
+  UNIQUE (collection_key, metadata_key)
+);
