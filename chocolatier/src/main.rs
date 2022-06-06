@@ -149,8 +149,6 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         let transaction = generated::ConfirmedTransaction::decode(&transaction[..])?;
         let transaction = TransactionWithStatusMeta::try_from(transaction)?;
 
-        let transaction = TransactionWithStatusMeta::from(transaction);
-
         // skip errors
         if transaction.get_status_meta().map(|m| m.status.is_err()) == Some(true) {
             continue;
