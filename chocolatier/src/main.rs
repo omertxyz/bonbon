@@ -1,7 +1,8 @@
 use {
     log::*,
     solana_sdk::clock::Slot,
-    solana_transaction_status::UiTransactionEncoding,
+    solana_storage_bigtable::StoredConfirmedBlockTransaction,
+    solana_transaction_status::TransactionWithStatusMeta,
 };
 
 #[derive(Debug)]
@@ -70,7 +71,7 @@ async fn fetch(
                 // TODO: dedup some work in bigtable library?
                 let signature = transaction.transaction_signature().clone();
                 let serialized = bincode::serialize(
-                    &transaction.encode(UiTransactionEncoding::Base64, None)?
+                    &StoredConfirmedBlockTransaction::from(transaction)
                 )?;
 
                 psql_client.query(

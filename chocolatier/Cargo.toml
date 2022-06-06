@@ -16,9 +16,9 @@ postgres = "0.19.2"
 postgres-types = { version = "0.2.3", features = ["derive"] }
 regex = "1.5.6"
 solana-sdk = "=1.10.9"
-solana-storage-bigtable = "=1.10.9"
+solana-storage-bigtable = { path = "../../../solana/storage-bigtable" }
 solana-transaction-status = "=1.10.9"
 spl-token = "3.2.0"
-tokio = "1.19.1"
+tokio = "1.15"
 tokio-postgres = "0.7.5"
 
