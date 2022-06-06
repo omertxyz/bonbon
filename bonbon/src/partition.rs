@@ -295,23 +295,6 @@ pub fn partition_metadata_instruction(
     Ok(Some(*partition_key))
 }
 
-pub fn partition_instruction(
-    instruction: &CompiledInstruction,
-    account_keys: &AccountKeys,
-    token_metas: &[TransactionTokenMeta],
-    partitioners: &[InstructionPartitioner]
-) -> Result<Option<Pubkey>, ErrorCode> {
-    let program_id = account_keys.get(usize::from(instruction.program_id_index))
-        .ok_or(ErrorCode::BadAccountKeyIndex)?;
-
-    if let Some(InstructionPartitioner { partitioner, .. }) = partitioners.iter().find(
-        |p| &p.program_id == program_id) {
-        partitioner(instruction, account_keys, token_metas)
-    } else {
-        Ok(None)
-    }
-}
-
 pub fn partition_transaction(
     transaction: TransactionWithStatusMeta,
     partitioners: &[InstructionPartitioner]
@@ -334,12 +317,22 @@ pub fn partition_transaction(
     let mut partitioned = vec![];
     let mut try_partition_instruction = |
         instruction: CompiledInstruction,
+        outer_index: usize,
+        inner_index: Option<usize>,
     | -> Result<(), ErrorCode> {
-        if let Some(partition_key) = partition_instruction(
-                &instruction, account_keys, &token_metas, partitioners)? {
+        let program_id = account_keys.get(usize::from(instruction.program_id_index))
+            .ok_or(ErrorCode::BadAccountKeyIndex)?;
+
+        if let Some(InstructionPartitioner { partitioner, .. }) = partitioners.iter().find(
+            |p| &p.program_id == program_id) {
+            let partition_key = partitioner(&instruction, account_keys, token_metas)?;
+            if partition_key.is_none() { return Ok(()); }
             partitioned.push(PartitionedInstruction {
                 instruction,
-                partition_key,
+                partition_key: partition_key.unwrap(),
+                program_key: *program_id,
+                outer_index: outer_index as i64,
+                inner_index: inner_index.map(|v| v as i64),
             });
         }
         Ok(())
@@ -355,17 +348,17 @@ pub fn partition_transaction(
     let inner_instructions = status_meta.inner_instructions.unwrap_or(vec![]);
     let mut inner_instructions_iter = inner_instructions.into_iter().peekable();
 
-    for (index, instruction) in outer_instructions.into_iter().enumerate() {
+    for (outer_index, instruction) in outer_instructions.into_iter().enumerate() {
         if let Some(inner) = &inner_instructions_iter.peek() {
-            if usize::from(inner.index) == index {
+            if usize::from(inner.index) == outer_index {
                 let inner = inner_instructions_iter.next().unwrap();
 
-                for instruction in inner.instructions {
-                    try_partition_instruction(instruction)?;
+                for (inner_index, instruction) in inner.instructions.into_iter().enumerate() {
+                    try_partition_instruction(instruction, outer_index, Some(inner_index))?;
                 }
             }
         }
-        try_partition_instruction(instruction)?;
+        try_partition_instruction(instruction, outer_index, None)?;
     }
 
     Ok(partitioned)
@@ -375,8 +368,15 @@ pub struct PartitionedInstruction {
     pub instruction: CompiledInstruction,
 
     pub partition_key: Pubkey,
+
+    pub program_key: Pubkey,
+
+    pub outer_index: i64,
+
+    pub inner_index: Option<i64>,
 }
 
+#[derive(Debug)]
 pub enum ErrorCode {
     MissingTransactionStatusMeta,
 
