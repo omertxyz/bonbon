@@ -11,6 +11,8 @@ use {
     solana_transaction_status::TransactionWithStatusMeta,
 };
 
+pub mod convert;
+
 #[derive(Debug)]
 pub struct Config {
     psql_config: String,
@@ -218,14 +220,14 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let mut partition_client = postgres::Client::connect(
         config.psql_config.as_str(), postgres::NoTls)?;
 
-    let select_all_token_mints_statement = psql_client.prepare(
+    let select_all_token_mints_statement = partition_client.prepare(
         "SELECT DISTINCT partition_key
          FROM partitions
          WHERE program_key = decode($1, 'base64')
         ",
     )?;
 
-    let select_partition_key = partition_client.prepare(
+    let select_partition_key = psql_client.prepare(
         "SELECT p.signature, p.instruction, a.keys
          FROM partitions p JOIN account_keys a ON p.signature = a.signature
          WHERE partition_key = decode($1, 'base64')
@@ -234,9 +236,21 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         ",
     )?;
 
+    let insert_bonbon_statement = psql_client.prepare(
+        "INSERT INTO bonbons VALUES ($1, $2, $3, $4, $5)"
+    )?;
+
+    let insert_creator_statement = psql_client.prepare(
+        "INSERT INTO creators VALUES ($1, $2, $3, $4)"
+    )?;
+
+    let insert_collection_statement = psql_client.prepare(
+        "INSERT INTO collections VALUES ($1, $2, $3)"
+    )?;
+
     let spl_token_id_encoded = base64::encode(spl_token::id());
     let params: &[&str] = &[&spl_token_id_encoded];
-    let mut it = psql_client.query_raw(
+    let mut it = partition_client.query_raw(
         &select_all_token_mints_statement,
         params,
     )?;
@@ -258,7 +272,7 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
         let mint_key_encoded = base64::encode(&mint_key);
         let metadata_key_encoded = base64::encode(&metadata_key);
-        let instructions = partition_client.query(
+        let instructions = psql_client.query(
             &select_partition_key,
             &[&mint_key_encoded, &metadata_key_encoded],
         )?;
@@ -283,11 +297,48 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(err) = update_err {
             warn!("failed to make bonbon {}: {:?}",
                   mint_key, err);
-        } else {
-            trace!("made bonbon {:?}", bonbon);
+            continue;
         }
 
-        break;
+        if bonbon.metadata_key == Pubkey::default() {
+            continue;
+        }
+
+        // TODO: more verification on partition_keys?
+        trace!("made bonbon {:?}", bonbon);
+        psql_client.query(
+            &insert_bonbon_statement,
+            &[
+                &bonbon.metadata_key.as_ref(),
+                &bonbon.mint_key.as_ref(),
+                &convert::EditionStatus::from(bonbon.edition_status),
+                &bonbon.limited_edition.map(convert::LimitedEdition::from),
+                &bonbon.uri,
+            ],
+        )?;
+
+        for creator in bonbon.creators {
+            psql_client.query(
+                &insert_creator_statement,
+                &[
+                    &creator.address.as_ref(),
+                    &bonbon.metadata_key.as_ref(),
+                    &creator.verified,
+                    &creator.share,
+                ],
+            )?;
+        }
+
+        if let Some(collection) = bonbon.collection {
+            psql_client.query(
+                &insert_collection_statement,
+                &[
+                    &collection.address.as_ref(),
+                    &bonbon.metadata_key.as_ref(),
+                    &collection.verified,
+                ],
+            )?;
+        }
     }
 
     Ok(())
