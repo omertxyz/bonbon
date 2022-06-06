@@ -1,8 +1,9 @@
 use {
     log::*,
     postgres::fallible_iterator::FallibleIterator,
+    prost::Message,
     solana_sdk::clock::Slot,
-    solana_storage_bigtable::StoredConfirmedBlockTransaction,
+    solana_storage_proto::convert::generated,
     solana_transaction_status::TransactionWithStatusMeta,
 };
 
@@ -75,9 +76,10 @@ async fn fetch(
 
                 // TODO: dedup some work in bigtable library?
                 let signature = transaction.transaction_signature().clone();
-                let serialized = bincode::serialize(
-                    &StoredConfirmedBlockTransaction::from(transaction)
-                )?;
+                let protobuf_tx = generated::ConfirmedTransaction::from(transaction);
+                let mut buf = Vec::with_capacity(protobuf_tx.encoded_len());
+                protobuf_tx.encode(&mut buf).unwrap();
+                // TODO: compress?
 
                 psql_client.query(
                     &insert_transaction_statement,
@@ -85,7 +87,7 @@ async fn fetch(
                         &slot,
                         &index,
                         &signature.as_ref(),
-                        &serialized,
+                        &buf,
                     ],
                 ).await?;
             }
@@ -144,8 +146,8 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         let signature: Vec<u8> = row.get(2);
         let transaction: Vec<u8> = row.get(3);
 
-        let transaction = bincode::deserialize
-            ::<StoredConfirmedBlockTransaction>(&transaction)?;
+        let transaction = generated::ConfirmedTransaction::decode(&transaction[..])?;
+        let transaction = TransactionWithStatusMeta::try_from(transaction)?;
 
         let transaction = TransactionWithStatusMeta::from(transaction);
 
