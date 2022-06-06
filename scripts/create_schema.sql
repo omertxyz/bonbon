@@ -16,3 +16,8 @@ CREATE TABLE partitions (
   signature BYTEA NOT NULL,
   instruction BYTEA
 );
+
+CREATE TABLE account_keys (
+  signature BYTEA PRIMARY KEY,
+  keys BYTEA[]
+);

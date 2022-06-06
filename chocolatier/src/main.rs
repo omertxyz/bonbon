@@ -134,6 +134,10 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         "INSERT INTO partitions VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
     )?;
 
+    let insert_account_keys_statement = insert_client.prepare(
+        "INSERT INTO account_keys VALUES ($1, $2)"
+    )?;
+
     let params: &[&str] = &[];
     let mut it = psql_client.query_raw(
         &select_all_statement,
@@ -154,8 +158,20 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
+        let account_keys = transaction.account_keys()
+            .iter().map(|k| k.as_ref().to_vec()).collect::<Vec<_>>();
+
         match partition_transaction(transaction, &partitioners) {
             Ok(partitioned) => {
+                if partitioned.len() != 0 {
+                    insert_client.query(
+                        &insert_account_keys_statement,
+                        &[
+                            &signature.as_slice(),
+                            &account_keys,
+                        ],
+                    )?;
+                }
                 for PartitionedInstruction {
                     instruction,
                     partition_key,
