@@ -59,6 +59,10 @@ async fn fetch(
         for (slot, block) in bt.get_confirmed_blocks_with_data(&chunk_slots).await? {
             let slot = slot as i64;
             for (index, transaction) in block.transactions.into_iter().enumerate() {
+                // skip errors
+                if transaction.get_status_meta().map(|m| m.status.is_err()) == Some(true) {
+                    continue;
+                }
                 let index = index as i64;
                 let mut found_token_or_metadata = false;
                 for account_key in transaction.account_keys().iter() {
@@ -145,6 +149,11 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
         let transaction = TransactionWithStatusMeta::from(transaction);
 
+        // skip errors
+        if transaction.get_status_meta().map(|m| m.status.is_err()) == Some(true) {
+            continue;
+        }
+
         match partition_transaction(transaction, &partitioners) {
             Ok(partitioned) => {
                 for PartitionedInstruction {
@@ -172,7 +181,7 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(err) => {
-                warn!("failed to partition {}.{}.{}: {:?}",
+                warn!("failed to partition {}.{:04x} [{}]: {:?}",
                       slot, block_index, bs58::encode(signature).into_string(), err);
             }
         }
