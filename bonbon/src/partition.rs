@@ -45,8 +45,11 @@ pub fn partition_token_instruction(
     account_keys: &AccountKeys,
     token_metas: &[TransactionTokenMeta],
 ) -> Result<Option<Pubkey>, ErrorCode> {
-    let get_account_key = |index| account_keys.get(index).ok_or(ErrorCode::BadAccountKeyIndex);
-    let get_token_meta_for = |index| {
+    let get_account_key = |index: usize| account_keys.get(
+        instruction.accounts[index].into()
+    ).ok_or(ErrorCode::BadAccountKeyIndex);
+    let get_token_meta_for = |index: usize| {
+        let index = instruction.accounts[index];
         token_metas.iter().find(|m| m.account_index == index)
             .ok_or(ErrorCode::BadTokenMetaAccountIndex)
     };
@@ -179,7 +182,9 @@ pub fn partition_metadata_instruction(
     account_keys: &AccountKeys,
     _token_balances: &[TransactionTokenMeta],
 ) -> Result<Option<Pubkey>, ErrorCode> {
-    let get_account_key = |index| account_keys.get(index).ok_or(ErrorCode::BadAccountKeyIndex);
+    let get_account_key = |index: usize| account_keys.get(
+        instruction.accounts[index].into()
+    ).ok_or(ErrorCode::BadAccountKeyIndex);
     // TODO: skip check for SetReservationList:
     // metaplex-foundation/metaplex/commit/3e26b6b208900181a9c42362f206690544467be9,
     // this instruction's arguments change. we don't actually care about this instruction atm so
