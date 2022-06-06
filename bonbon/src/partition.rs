@@ -41,7 +41,7 @@ pub fn partition_token_instruction(
     let get_account_key = |index| account_keys.get(index).ok_or(ErrorCode::BadAccountKeyIndex);
     let get_token_meta_for = |index| {
         token_metas.iter().find(|m| m.account_index == index)
-            .ok_or(ErrorCode::BadAccountKeyIndex)
+            .ok_or(ErrorCode::BadTokenMetaAccountIndex)
     };
 
     // TODO: less jank. filter/parse all these upfront?
@@ -381,6 +381,8 @@ pub enum ErrorCode {
     MissingTransactionStatusMeta,
 
     BadAccountKeyIndex,
+
+    BadTokenMetaAccountIndex,
 
     BadPubkeyString,
 
