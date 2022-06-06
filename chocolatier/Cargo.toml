@@ -20,4 +20,5 @@ solana-storage-bigtable = "=1.10.9"
 solana-transaction-status = "=1.10.9"
 spl-token = "3.2.0"
 tokio = "1.19.1"
+tokio-postgres = "0.7.5"
 

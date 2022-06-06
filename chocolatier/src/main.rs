@@ -28,15 +28,21 @@ async fn fetch(
         }
     })().ok_or("Invalid --block_range")?;
 
-    let bt = solana_storage_bigtable::LedgerStorage::new(
-        true, None, Some(bigtable_path)).await.unwrap();
+    let (psql_client, psql_connection) = tokio_postgres::connect(
+        config.psql_config.as_str(), tokio_postgres::NoTls).await?;
 
-    let mut psql_client = postgres::Client::connect(
-        config.psql_config.as_str(), postgres::NoTls)?;
+    let psql_join_handle = tokio::spawn(async move {
+        if let Err(e) = psql_connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
 
     let insert_transaction_statement = psql_client.prepare(
         "INSERT INTO transactions VALUES ($1, $2, $3, $4)"
-    )?;
+    ).await?;
+
+    let bt = solana_storage_bigtable::LedgerStorage::new(
+        true, None, Some(bigtable_path)).await.unwrap();
 
     // TODO: parameterize?
     let chunk_size = 16;
@@ -75,12 +81,17 @@ async fn fetch(
                         &signature.as_ref(),
                         &serialized,
                     ],
-                )?;
+                ).await?;
             }
         }
 
         chunk_start = chunk_end;
     }
+
+    info!("finished block fetch. waiting for db join...");
+
+    drop(psql_client);
+    psql_join_handle.await?;
 
     Ok(())
 }
@@ -165,6 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .level_for("chocolatier", log::LevelFilter::Trace)
         // postgres is a bit too verbose about queries so info
         .level_for("postgres", log::LevelFilter::Info)
+        .level_for("tokio_postgres", log::LevelFilter::Info)
         .level_for("h2", log::LevelFilter::Info)
         .chain(fern::log_file(config.log_file.as_str())?)
         .apply()?;
