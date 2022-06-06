@@ -88,12 +88,26 @@ pub struct Bonbon {
 
     pub metadata_key: Pubkey, // could be pubkey::default
 
+    // TODO: current_owner
+    // we can probably save the `owner` field in the token-balance changes
+    // and persist them in-between to `account_keys` also...
     pub current_account: Option<Pubkey>,
 
     pub edition_status: EditionStatus,
 
     pub limited_edition: Option<LimitedEdition>,
 
+    // TODO: for limited editions, link with master edition for uri, creators, collection
+    // these are immutable after initialization (except that the `verified` flags can be changed)
+    //
+    // approaches...
+    // 1. add an auxiliary key for each partition element and then also fetch all of those when
+    //    assembling so that we can recalculate the correct state to apply. for the auxiliary key,
+    //    we only care about create + update metadata and can ignore the other instructions
+    // 2. add a record of updates so that we can join up values at the end by slot/block/indexes.
+    //    track creator / collection verification and override those with the new values for the
+    //    limited edition
+    //
     pub uri: Vec<u8>,
 
     pub creators: Vec<Creator>,
