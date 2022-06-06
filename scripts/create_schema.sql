@@ -12,7 +12,7 @@ CREATE TABLE partitions (
   slot BIGINT NOT NULL,
   block_index BIGINT NOT NULL,
   outer_index BIGINT NOT NULL,
-  inner_index BIGINT NOT NULL,
+  inner_index BIGINT,
   signature BYTEA NOT NULL,
   instruction BYTEA
 );
