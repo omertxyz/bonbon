@@ -1,5 +1,6 @@
 use {
     log::*,
+    postgres::fallible_iterator::FallibleIterator,
     solana_sdk::clock::Slot,
     solana_storage_bigtable::StoredConfirmedBlockTransaction,
     solana_transaction_status::TransactionWithStatusMeta,
@@ -97,7 +98,86 @@ async fn fetch(
     Ok(())
 }
 
-fn partition(_config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    use bonbon::partition::*;
+    let partitioners = [
+        InstructionPartitioner {
+            partitioner: partition_token_instruction,
+            program_id: spl_token::id(),
+        },
+        InstructionPartitioner {
+            partitioner: partition_metadata_instruction,
+            program_id: mpl_token_metadata::id(),
+        },
+    ];
+
+    let mut psql_client = postgres::Client::connect(
+        config.psql_config.as_str(), postgres::NoTls)?;
+
+    let select_all_statement = psql_client.prepare(
+        "SELECT *
+         FROM transactions
+         ORDER_BY (slot, block_index)
+        ",
+    )?;
+
+    let mut insert_client = postgres::Client::connect(
+        config.psql_config.as_str(), postgres::NoTls)?;
+
+    let insert_transaction_statement = insert_client.prepare(
+        "INSERT INTO partitions VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+    )?;
+
+    let params: &[&str] = &[];
+    let mut it = psql_client.query_raw(
+        &select_all_statement,
+        params,
+    )?;
+
+    while let Some(row) = it.next()? {
+        let slot: i64 = row.get(0);
+        let block_index: i64 = row.get(1);
+        let signature: Vec<u8> = row.get(2);
+        let transaction: Vec<u8> = row.get(3);
+
+        let transaction = bincode::deserialize
+            ::<StoredConfirmedBlockTransaction>(&transaction)?;
+
+        let transaction = TransactionWithStatusMeta::from(transaction);
+
+        match partition_transaction(transaction, &partitioners) {
+            Ok(partitioned) => {
+                for PartitionedInstruction {
+                    instruction,
+                    partition_key,
+                    program_key,
+                    outer_index,
+                    inner_index,
+                } in partitioned {
+                    // TODO: soft error?
+                    let serialized = bincode::serialize(&instruction)?;
+                    insert_client.query(
+                        &insert_transaction_statement,
+                        &[
+                            &partition_key.as_ref(),
+                            &program_key.as_ref(),
+                            &slot,
+                            &block_index,
+                            &outer_index,
+                            &inner_index,
+                            &signature.as_slice(),
+                            &serialized,
+                        ],
+                    )?;
+                }
+            }
+            Err(err) => {
+                warn!("failed to partition {}.{}.{}: {:?}",
+                      slot, block_index, bs58::encode(signature).into_string(), err);
+            }
+        }
+    }
+
     Ok(())
 }
 
