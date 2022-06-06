@@ -155,6 +155,9 @@ pub fn partition_token_instruction(
                 AuthorityType::MintTokens => {
                     Ok(None)
                 }
+                AuthorityType::FreezeAccount => {
+                    Ok(None)
+                }
                 // here we could be changing ownership (aka transfer) so do handle this one...
                 _ => token_account_mint_key(0)
             }
