@@ -28,30 +28,41 @@ pub struct TransactionTokenMeta {
     pub mint_key: Pubkey,
 }
 
+pub struct InstructionContext<'a, 'k> {
+    instruction: &'a CompiledInstruction,
+
+    account_keys: &'a AccountKeys<'k>,
+
+    token_metas: &'a [TransactionTokenMeta],
+
+    transient_metas: &'a mut Vec<TransactionTokenMeta>,
+}
+
 pub struct InstructionPartitioner {
     pub program_id: Pubkey,
 
     pub partitioner: fn (
-        instruction: &CompiledInstruction,
-        account_keys: &AccountKeys,
-        token_metas: &[TransactionTokenMeta],
+        instruction_context: InstructionContext,
     ) -> Result<Option<Pubkey>, ErrorCode>,
 }
 
 // NB: only returns a value for instructions that are 'likely' to contain an NFT-related token
 // instruction (i.e heuristic based on mint, amount, etc)
 pub fn partition_token_instruction(
-    instruction: &CompiledInstruction,
-    account_keys: &AccountKeys,
-    token_metas: &[TransactionTokenMeta],
+    InstructionContext {
+        instruction, account_keys, token_metas, transient_metas,
+    }: InstructionContext,
 ) -> Result<Option<Pubkey>, ErrorCode> {
     let get_account_key = |index: usize| account_keys.get(
         instruction.accounts[index].into()
     ).ok_or(ErrorCode::BadAccountKeyIndex);
     let get_token_meta_for = |index: usize| {
         let index = instruction.accounts[index];
-        token_metas.iter().find(|m| m.account_index == index)
-            .ok_or(ErrorCode::BadTokenMetaAccountIndex)
+        if let Some(v) = token_metas.iter().find(|m| m.account_index == index) {
+            Some(v)
+        } else {
+            transient_metas.iter().find(|m| m.account_index == index)
+        }
     };
 
     // TODO: less jank. filter/parse all these upfront?
@@ -68,12 +79,24 @@ pub fn partition_token_instruction(
     };
 
     let token_account_mint_key = |index| -> Result<Option<Pubkey>, ErrorCode> {
-        let token_meta = get_token_meta_for(index)?;
-        if !heuristic_token_meta_ok(token_meta) {
-            Ok(None)
-        } else {
-            Ok(Some(token_meta.mint_key))
-        }
+        let token_meta = get_token_meta_for(index)
+            .ok_or(ErrorCode::BadTokenMetaAccountIndex)?;
+        Ok(heuristic_token_meta_ok(token_meta)
+            .then(|| token_meta.mint_key))
+    };
+
+    let add_transient_token_meta = |
+        transient_metas: &mut Vec<TransactionTokenMeta>,
+    | -> Result<(), ErrorCode> {
+        // didn't show up in pre- or post- balances so could be transient...
+        transient_metas.push(TransactionTokenMeta {
+            account_index: instruction.accounts[0],
+            decimals: 1, // shouldn't matter...
+            pre_amount: None,
+            post_amount: None,
+            mint_key: *get_account_key(1)?,
+        });
+        Ok(())
     };
 
     let token_instruction = TokenInstruction::unpack(&instruction.data)
@@ -88,10 +111,24 @@ pub fn partition_token_instruction(
             }
         },
         TokenInstruction::InitializeAccount { .. } => {
-            token_account_mint_key(0)
+            Ok(match get_token_meta_for(0) {
+                Some(token_meta) => heuristic_token_meta_ok(token_meta)
+                    .then(|| token_meta.mint_key),
+                None => {
+                    add_transient_token_meta(transient_metas)?;
+                    None
+                }
+            })
         },
         TokenInstruction::InitializeAccount2 { .. } => {
-            token_account_mint_key(0)
+            Ok(match get_token_meta_for(0) {
+                Some(token_meta) => heuristic_token_meta_ok(token_meta)
+                    .then(|| token_meta.mint_key),
+                None => {
+                    add_transient_token_meta(transient_metas)?;
+                    None
+                }
+            })
         },
         TokenInstruction::InitializeMultisig { .. } => {
             Ok(None)
@@ -136,6 +173,10 @@ pub fn partition_token_instruction(
         }
         TokenInstruction::CloseAccount => {
             // mints can't be closed and a token account must have zero balance to be closed so...
+            if let Some(index) = transient_metas.iter().position(
+                    |m| m.account_index == instruction.accounts[0]) {
+                transient_metas.swap_remove(index);
+            }
             Ok(None)
         }
         TokenInstruction::FreezeAccount => {
@@ -178,9 +219,9 @@ pub fn partition_token_instruction(
 }
 
 pub fn partition_metadata_instruction(
-    instruction: &CompiledInstruction,
-    account_keys: &AccountKeys,
-    _token_balances: &[TransactionTokenMeta],
+    InstructionContext {
+        instruction, account_keys, ..
+    }: InstructionContext,
 ) -> Result<Option<Pubkey>, ErrorCode> {
     let get_account_key = |index: usize| account_keys.get(
         instruction.accounts[index].into()
@@ -344,6 +385,7 @@ pub fn partition_transaction(
     }
 
     let token_metas = &token_metas.into_values().collect::<Vec<_>>();
+    let mut transient_metas = vec![];
 
     let mut partitioned = vec![];
     let mut try_partition_instruction = |
@@ -356,7 +398,12 @@ pub fn partition_transaction(
 
         if let Some(InstructionPartitioner { partitioner, .. }) = partitioners.iter().find(
             |p| &p.program_id == program_id) {
-            let partition_key = partitioner(&instruction, account_keys, token_metas)?;
+            let partition_key = partitioner(InstructionContext {
+                instruction: &instruction,
+                account_keys,
+                token_metas,
+                transient_metas: &mut transient_metas,
+            })?;
             if partition_key.is_none() { return Ok(()); }
             partitioned.push(PartitionedInstruction {
                 instruction,
@@ -392,6 +439,10 @@ pub fn partition_transaction(
         try_partition_instruction(instruction, outer_index, None)?;
     }
 
+    if transient_metas.len() != 0 {
+        return Err(ErrorCode::FailedTransientTokenAccountMatching);
+    }
+
     Ok(partitioned)
 }
 
@@ -418,5 +469,7 @@ pub enum ErrorCode {
     BadPubkeyString,
 
     FailedInstructionDeserialization,
+
+    FailedTransientTokenAccountMatching,
 }
 
