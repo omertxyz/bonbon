@@ -235,7 +235,8 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let select_partition_key = psql_client.prepare(
-        "SELECT p.signature, p.instruction, a.keys, a.metas
+        "SELECT p.signature, p.instruction, a.keys, a.metas,
+                p.slot, p.block_index, p.outer_index, p.inner_index
          FROM partitions p JOIN account_keys a ON p.signature = a.signature
          WHERE partition_key = decode($1, 'base64')
             OR partition_key = decode($2, 'base64')
@@ -244,15 +245,11 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let insert_bonbon_statement = psql_client.prepare(
-        "INSERT INTO bonbons VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        "INSERT INTO bonbons VALUES ($1, $2, $3, $4, $5, $6)"
     )?;
 
-    let insert_creator_statement = psql_client.prepare(
-        "INSERT INTO creators VALUES ($1, $2, $3, $4)"
-    )?;
-
-    let insert_collection_statement = psql_client.prepare(
-        "INSERT INTO collections VALUES ($1, $2, $3)"
+    let insert_glazing_statement = psql_client.prepare(
+        "INSERT INTO glazings VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
     )?;
 
     let spl_token_id_encoded = base64::encode(spl_token::id());
@@ -309,7 +306,19 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             }).collect::<Vec<_>>();
             deserialization_duration += deserialization_start.elapsed();
 
-            match bonbon.update(&instruction, &keys, &metas, &updaters) {
+            let slot: i64 = row.get(4);
+            let block_index: i64 = row.get(5);
+            let outer_index: i64 = row.get(6);
+            let inner_index: Option<i64> = row.get(7);
+
+            let instruction_context = InstructionContext {
+                account_keys: &keys,
+                instruction: &instruction,
+                owners: &metas,
+                instruction_index: InstructionIndex { slot, block_index, outer_index, inner_index },
+            };
+
+            match bonbon.update(instruction_context, &updaters) {
                 Ok(_) => {}
                 Err(err) => {
                     update_err = Some(err);
@@ -339,32 +348,30 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
                 &bonbon.current_account.map(|k| convert::SqlPubkey(k)),
                 &convert::EditionStatus::from(bonbon.edition_status),
                 &bonbon.limited_edition.map(convert::LimitedEdition::from),
-                &bonbon.uri,
             ],
         )?;
 
-        for creator in bonbon.creators {
+        for glazing in bonbon.glazings {
             psql_client.query(
-                &insert_creator_statement,
+                &insert_glazing_statement,
                 &[
-                    &creator.address.as_ref(),
                     &bonbon.metadata_key.as_ref(),
-                    &creator.verified,
-                    &creator.share,
+                    &glazing.uri,
+                    &glazing.collection.as_ref().map(|c| convert::SqlPubkey(c.address)),
+                    &glazing.collection.as_ref().map(|c| c.verified),
+                    &glazing.creators.get(0).map(convert::Creator::from),
+                    &glazing.creators.get(1).map(convert::Creator::from),
+                    &glazing.creators.get(2).map(convert::Creator::from),
+                    &glazing.creators.get(3).map(convert::Creator::from),
+                    &glazing.creators.get(4).map(convert::Creator::from),
+                    &glazing.instruction_index.slot,
+                    &glazing.instruction_index.block_index,
+                    &glazing.instruction_index.outer_index,
+                    &glazing.instruction_index.inner_index,
                 ],
             )?;
         }
 
-        if let Some(collection) = bonbon.collection {
-            psql_client.query(
-                &insert_collection_statement,
-                &[
-                    &collection.address.as_ref(),
-                    &bonbon.metadata_key.as_ref(),
-                    &collection.verified,
-                ],
-            )?;
-        }
         update_queries += query_start.elapsed();
     }
     log::info!("reassembled in {:?}", loop_start.elapsed());

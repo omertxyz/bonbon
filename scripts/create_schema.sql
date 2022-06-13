@@ -48,23 +48,28 @@ CREATE TABLE bonbons (
   current_owner BYTEA,
   current_account BYTEA,
   edition_status edition_status NOT NULL,
-  limited_edition limited_edition,
-  uri BYTEA
+  limited_edition limited_edition
 );
 
-CREATE TABLE creators (
-  creator_key BYTEA NOT NULL,
-  metadata_key BYTEA NOT NULL,
+CREATE TYPE creator AS (
+  creator_key BYTEA,
   verified BOOLEAN,
-  share SMALLINT,
-
-  UNIQUE (creator_key, metadata_key)
+  share SMALLINT
 );
 
-CREATE TABLE collections (
-  collection_key BYTEA NOT NULL,
+CREATE TABLE glazings (
   metadata_key BYTEA NOT NULL,
-  verified BOOLEAN,
-
-  UNIQUE (collection_key, metadata_key)
+  uri BYTEA,
+  collection_key BYTEA,
+  collection_verified BOOLEAN,
+  creator0 creator,
+  creator1 creator,
+  creator2 creator,
+  creator3 creator,
+  creator4 creator,
+  slot BIGINT NOT NULL,
+  block_index BIGINT NOT NULL,
+  outer_index BIGINT NOT NULL,
+  inner_index BIGINT
 );
+
