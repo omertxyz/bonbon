@@ -41,7 +41,7 @@ pub struct LimitedEdition {
     pub edition_num: Option<i64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Creator {
     pub address: Pubkey,
 
@@ -66,7 +66,7 @@ fn from_creators(
     creators.unwrap_or(vec![]).into_iter().map(Creator::from).collect()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Collection {
     pub address: Pubkey,
 
@@ -80,6 +80,15 @@ impl From<MplCollection> for Collection {
             verified: creator.verified,
         }
     }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct Glazing {
+    pub uri: Vec<u8>,
+
+    pub creators: Vec<Creator>,
+
+    pub collection: Option<Collection>,
 }
 
 #[derive(Default, Debug)]
@@ -97,22 +106,46 @@ pub struct Bonbon {
 
     pub limited_edition: Option<LimitedEdition>,
 
-    // TODO: for limited editions, link with master edition for uri, creators, collection
-    // these are immutable after initialization (except that the `verified` flags can be changed)
-    //
-    // approaches...
-    // 1. add an auxiliary key for each partition element and then also fetch all of those when
-    //    assembling so that we can recalculate the correct state to apply. for the auxiliary key,
-    //    we only care about create + update metadata and can ignore the other instructions
-    // 2. add a record of updates so that we can join up values at the end by slot/block/indexes.
-    //    track creator / collection verification and override those with the new values for the
-    //    limited edition
-    //
-    pub uri: Vec<u8>,
+    // we add a record of updates so that we can join up values at the end by slot/block/indexes.
+    // track creator / collection verification and override those with the new values for the
+    // limited edition
+    pub glazing: Vec<Glazing>,
+}
 
-    pub creators: Vec<Creator>,
+impl Bonbon {
+    pub fn apply_creator_verification(
+        &mut self, creator_key: &Pubkey, verified: bool,
+    ) {
+        if let Some(last) = self.glazing.last() {
+            let mut next: Glazing = last.clone();
+            for creator in &mut next.creators {
+                if creator.address == *creator_key {
+                    creator.verified = verified;
+                    break;
+                }
+            }
+            self.glazing.push(next);
+        } else {
+            self.glazing.push(Glazing {
+                creators: vec![Creator { address: *creator_key, verified, share: 0 }],
+                ..Glazing::default()
+            });
+        }
+    }
 
-    pub collection: Option<Collection>,
+    pub fn apply_collection_verification(
+        &mut self, collection_key: &Pubkey, verified: bool,
+    ) {
+        let prev = self.glazing.last()
+            .map(|v| v.clone()).unwrap_or(Glazing::default());
+        self.glazing.push(Glazing {
+            collection: Some(Collection {
+                address: *collection_key,
+                verified,
+            }),
+            ..prev
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -161,8 +194,11 @@ pub fn update_metadata_instruction(
             }
 
             bonbon.metadata_key = *metadata_key;
-            bonbon.uri = args.data.uri.into_bytes();
-            bonbon.creators = from_creators(args.data.creators);
+            bonbon.glazing.push(Glazing {
+                uri: args.data.uri.into_bytes(),
+                creators: from_creators(args.data.creators),
+                collection: None,
+            });
         },
         MetadataInstruction::CreateMetadataAccountV2(args) => {
             // create metadata with datav2 (adds collection info, etc)
@@ -172,9 +208,11 @@ pub fn update_metadata_instruction(
             }
 
             bonbon.metadata_key = *metadata_key;
-            bonbon.uri = args.data.uri.into_bytes();
-            bonbon.creators = from_creators(args.data.creators);
-            bonbon.collection = args.data.collection.map(Collection::from);
+            bonbon.glazing.push(Glazing {
+                uri: args.data.uri.into_bytes(),
+                creators: from_creators(args.data.creators),
+                collection: args.data.collection.map(Collection::from),
+            });
         },
         MetadataInstruction::UpdateMetadataAccount(args) => {
             let metadata_key = get_account_key(0)?;
@@ -183,8 +221,11 @@ pub fn update_metadata_instruction(
             }
 
             if let Some(data) = args.data {
-                bonbon.uri = data.uri.into_bytes();
-                bonbon.creators = from_creators(data.creators);
+                bonbon.glazing.push(Glazing {
+                    uri: data.uri.into_bytes(),
+                    creators: from_creators(data.creators),
+                    collection: None,
+                });
             }
         },
         MetadataInstruction::UpdateMetadataAccountV2(args) => {
@@ -194,9 +235,11 @@ pub fn update_metadata_instruction(
             }
 
             if let Some(data) = args.data {
-                bonbon.uri = data.uri.into_bytes();
-                bonbon.creators = from_creators(data.creators);
-                bonbon.collection = data.collection.map(Collection::from);
+                bonbon.glazing.push(Glazing {
+                    uri: data.uri.into_bytes(),
+                    creators: from_creators(data.creators),
+                    collection: data.collection.map(Collection::from),
+                });
             }
         },
         MetadataInstruction::DeprecatedCreateMasterEdition(_) => {
@@ -275,12 +318,7 @@ pub fn update_metadata_instruction(
             }
 
             let creator_key = get_account_key(1)?;
-            for creator in &mut bonbon.creators {
-                if creator.address == *creator_key {
-                    creator.verified = true;
-                    break;
-                }
-            }
+            bonbon.apply_creator_verification(creator_key, true);
         }
         MetadataInstruction::RemoveCreatorVerification => {
             let metadata_key = get_account_key(0)?;
@@ -289,12 +327,7 @@ pub fn update_metadata_instruction(
             }
 
             let creator_key = get_account_key(1)?;
-            for creator in &mut bonbon.creators {
-                if creator.address == *creator_key {
-                    creator.verified = false;
-                    break;
-                }
-            }
+            bonbon.apply_creator_verification(creator_key, false);
         }
         MetadataInstruction::VerifyCollection => {
             let metadata_key = get_account_key(0)?;
@@ -302,11 +335,8 @@ pub fn update_metadata_instruction(
                 return Err(ErrorCode::InvalidMetadataVerifyOperation);
             }
 
-            if let Some(collection) = &mut bonbon.collection {
-                collection.verified = true;
-            } else {
-                // TODO: metadata processor seems to accept this. keep stats?
-            }
+            let collection_key = get_account_key(3)?;
+            bonbon.apply_collection_verification(collection_key, true);
         }
         MetadataInstruction::SetAndVerifyCollection => {
             let metadata_key = get_account_key(0)?;
@@ -314,10 +344,8 @@ pub fn update_metadata_instruction(
                 return Err(ErrorCode::InvalidMetadataVerifyOperation);
             }
 
-            bonbon.collection = Some(Collection {
-                address: *get_account_key(4)?,
-                verified: true,
-            });
+            let collection_key = get_account_key(4)?;
+            bonbon.apply_collection_verification(collection_key, true);
         }
         MetadataInstruction::UnverifyCollection => {
             let metadata_key = get_account_key(0)?;
@@ -325,11 +353,8 @@ pub fn update_metadata_instruction(
                 return Err(ErrorCode::InvalidMetadataVerifyOperation);
             }
 
-            if let Some(collection) = &mut bonbon.collection {
-                collection.verified = false;
-            } else {
-                // TODO: metadata processor seems to accept this. keep stats?
-            }
+            let collection_key = get_account_key(3)?;
+            bonbon.apply_collection_verification(collection_key, true);
         }
         MetadataInstruction::UpdatePrimarySaleHappenedViaToken => { }
         MetadataInstruction::DeprecatedSetReservationList(_) => { }
