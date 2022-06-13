@@ -26,6 +26,8 @@ pub struct TransactionTokenMeta {
     pub post_amount: Option<StringAmount>,
 
     pub mint_key: Pubkey,
+
+    pub owner_key: Pubkey,
 }
 
 pub struct InstructionContext<'a, 'k> {
@@ -87,6 +89,7 @@ pub fn partition_token_instruction(
 
     let add_transient_token_meta = |
         transient_metas: &mut Vec<TransactionTokenMeta>,
+        owner_key: Pubkey,
     | -> Result<(), ErrorCode> {
         // didn't show up in pre- or post- balances so could be transient...
         transient_metas.push(TransactionTokenMeta {
@@ -95,6 +98,7 @@ pub fn partition_token_instruction(
             pre_amount: None,
             post_amount: None,
             mint_key: *get_account_key(1)?,
+            owner_key,
         });
         Ok(())
     };
@@ -115,17 +119,17 @@ pub fn partition_token_instruction(
                 Some(token_meta) => heuristic_token_meta_ok(token_meta)
                     .then(|| token_meta.mint_key),
                 None => {
-                    add_transient_token_meta(transient_metas)?;
+                    add_transient_token_meta(transient_metas, *get_account_key(2)?)?;
                     None
                 }
             })
         },
-        TokenInstruction::InitializeAccount2 { .. } => {
+        TokenInstruction::InitializeAccount2 { owner } => {
             Ok(match get_token_meta_for(0) {
                 Some(token_meta) => heuristic_token_meta_ok(token_meta)
                     .then(|| token_meta.mint_key),
                 None => {
-                    add_transient_token_meta(transient_metas)?;
+                    add_transient_token_meta(transient_metas, owner)?;
                     None
                 }
             })
@@ -359,7 +363,7 @@ pub fn partition_metadata_instruction(
 pub fn partition_transaction(
     transaction: TransactionWithStatusMeta,
     partitioners: &[InstructionPartitioner]
-) -> Result<Vec<PartitionedInstruction>, ErrorCode> {
+) -> Result<(Vec<PartitionedInstruction>, Vec<TransactionTokenMeta>), ErrorCode> {
     let status_meta = transaction.get_status_meta()
         .ok_or(ErrorCode::MissingTransactionStatusMeta)?;
 
@@ -371,6 +375,8 @@ pub fn partition_transaction(
         pre_amount: None,
         post_amount: None,
         mint_key: Pubkey::new(bs58::decode(b.mint.clone()).into_vec()
+            .map_err(|_| ErrorCode::BadPubkeyString)?.as_slice()),
+        owner_key: Pubkey::new(bs58::decode(b.owner.clone()).into_vec()
             .map_err(|_| ErrorCode::BadPubkeyString)?.as_slice()),
     });
 
@@ -387,7 +393,7 @@ pub fn partition_transaction(
         meta.post_amount = Some(balance.ui_token_amount.amount);
     }
 
-    let token_metas = &token_metas.into_values().collect::<Vec<_>>();
+    let token_metas = token_metas.into_values().collect::<Vec<_>>();
     let mut transient_metas = vec![];
 
     let mut partitioned = vec![];
@@ -404,7 +410,7 @@ pub fn partition_transaction(
             let partition_key = partitioner(InstructionContext {
                 instruction: &instruction,
                 account_keys,
-                token_metas,
+                token_metas: &token_metas,
                 transient_metas: &mut transient_metas,
             })?;
             if partition_key.is_none() { return Ok(()); }
@@ -446,7 +452,7 @@ pub fn partition_transaction(
         return Err(ErrorCode::FailedTransientTokenAccountMatching);
     }
 
-    Ok(partitioned)
+    Ok((partitioned, token_metas))
 }
 
 pub struct PartitionedInstruction {

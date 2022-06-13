@@ -88,9 +88,9 @@ pub struct Bonbon {
 
     pub metadata_key: Pubkey, // could be pubkey::default
 
-    // TODO: current_owner
-    // we can probably save the `owner` field in the token-balance changes
-    // and persist them in-between to `account_keys` also...
+    // TODO: track transient token_metas so we can have stronger assertions?
+    pub current_owner: Option<Pubkey>,
+
     pub current_account: Option<Pubkey>,
 
     pub edition_status: EditionStatus,
@@ -131,11 +131,18 @@ pub enum ErrorCode {
     InvalidMetadataVerifyOperation,
 }
 
+pub struct TransactionTokenOwnerMeta {
+    pub account_index: u8,
+
+    pub owner_key: Pubkey,
+}
+
 
 pub fn update_metadata_instruction(
     bonbon: &mut Bonbon,
     instruction: &CompiledInstruction,
     account_keys: &[Pubkey],
+    _owners: &[TransactionTokenOwnerMeta],
 ) -> Result<(), ErrorCode> {
     let get_account_key = |index: usize| account_keys.get(
         usize::from(instruction.accounts[index])
@@ -347,10 +354,16 @@ pub fn update_token_instruction(
     bonbon: &mut Bonbon,
     instruction: &CompiledInstruction,
     account_keys: &[Pubkey],
+    owners: &[TransactionTokenOwnerMeta],
 ) -> Result<(), ErrorCode> {
     let get_account_key = |index: usize| account_keys.get(
         usize::from(instruction.accounts[index])
     ).ok_or(ErrorCode::BadAccountKeyIndex);
+
+    let get_token_meta_for = |index: usize| {
+        let index = instruction.accounts[index];
+        owners.iter().find(|m| m.account_index == index)
+    };
 
     let token_instruction = TokenInstruction::unpack(&instruction.data)
         .map_err(|_| ErrorCode::FailedInstructionDeserialization)?;
@@ -363,6 +376,7 @@ pub fn update_token_instruction(
         TokenInstruction::InitializeAccount { .. } => {},
         TokenInstruction::InitializeAccount2 { .. } => {},
         TokenInstruction::Transfer { .. } => {
+            bonbon.current_owner = get_token_meta_for(1).map(|m| m.owner_key);
             bonbon.current_account = Some(*get_account_key(1)?);
         }
         TokenInstruction::SetAuthority { authority_type, .. } => {
@@ -375,18 +389,23 @@ pub fn update_token_instruction(
             }
         }
         TokenInstruction::MintTo { .. } => {
+            bonbon.current_owner = get_token_meta_for(1).map(|m| m.owner_key);
             bonbon.current_account = Some(*get_account_key(1)?);
         }
         TokenInstruction::Burn { .. } => {
+            bonbon.current_owner = None;
             bonbon.current_account = None;
         }
         TokenInstruction::TransferChecked { .. } => {
+            bonbon.current_owner = get_token_meta_for(2).map(|m| m.owner_key);
             bonbon.current_account = Some(*get_account_key(2)?);
         }
         TokenInstruction::MintToChecked { .. } => {
+            bonbon.current_owner = get_token_meta_for(1).map(|m| m.owner_key);
             bonbon.current_account = Some(*get_account_key(1)?);
         }
         TokenInstruction::BurnChecked { .. } => {
+            bonbon.current_owner = None;
             bonbon.current_account = None;
         }
         TokenInstruction::InitializeMultisig { .. } => {}
@@ -411,6 +430,7 @@ pub struct BonbonUpdater {
         bonbon: &mut Bonbon,
         instruction: &CompiledInstruction,
         account_keys: &[Pubkey],
+        owners: &[TransactionTokenOwnerMeta],
     ) -> Result<(), ErrorCode>,
 }
 
@@ -419,14 +439,15 @@ impl Bonbon {
         &mut self,
         instruction: &CompiledInstruction,
         account_keys: &[Pubkey],
-        updaters: &[BonbonUpdater]
+        owners: &[TransactionTokenOwnerMeta],
+        updaters: &[BonbonUpdater],
     ) -> Result<(), ErrorCode> {
         let program_id = account_keys.get(usize::from(instruction.program_id_index))
             .ok_or(ErrorCode::BadAccountKeyIndex)?;
 
         if let Some(BonbonUpdater { update, .. }) = updaters.iter().find(
                 |u| u.program_id == *program_id) {
-            update(self, instruction, account_keys)
+            update(self, instruction, account_keys, owners)
         } else {
             Ok(())
         }
