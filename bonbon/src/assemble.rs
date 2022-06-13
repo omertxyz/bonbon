@@ -83,12 +83,25 @@ impl From<MplCollection> for Collection {
 }
 
 #[derive(Default, Debug, Clone)]
+pub struct InstructionIndex {
+    pub slot: i64,
+
+    pub block_index: i64,
+
+    pub outer_index: i64,
+
+    pub inner_index: Option<i64>,
+}
+
+#[derive(Default, Debug, Clone)]
 pub struct Glazing {
     pub uri: Vec<u8>,
 
     pub creators: Vec<Creator>,
 
     pub collection: Option<Collection>,
+
+    pub instruction_index: InstructionIndex,
 }
 
 #[derive(Default, Debug)]
@@ -109,14 +122,15 @@ pub struct Bonbon {
     // we add a record of updates so that we can join up values at the end by slot/block/indexes.
     // track creator / collection verification and override those with the new values for the
     // limited edition
-    pub glazing: Vec<Glazing>,
+    pub glazings: Vec<Glazing>,
 }
 
 impl Bonbon {
     pub fn apply_creator_verification(
         &mut self, creator_key: &Pubkey, verified: bool,
+        instruction_index: InstructionIndex,
     ) {
-        if let Some(last) = self.glazing.last() {
+        if let Some(last) = self.glazings.last() {
             let mut next: Glazing = last.clone();
             for creator in &mut next.creators {
                 if creator.address == *creator_key {
@@ -124,10 +138,12 @@ impl Bonbon {
                     break;
                 }
             }
-            self.glazing.push(next);
+            next.instruction_index = instruction_index;
+            self.glazings.push(next);
         } else {
-            self.glazing.push(Glazing {
+            self.glazings.push(Glazing {
                 creators: vec![Creator { address: *creator_key, verified, share: 0 }],
+                instruction_index,
                 ..Glazing::default()
             });
         }
@@ -135,14 +151,16 @@ impl Bonbon {
 
     pub fn apply_collection_verification(
         &mut self, collection_key: &Pubkey, verified: bool,
+        instruction_index: InstructionIndex,
     ) {
-        let prev = self.glazing.last()
+        let prev = self.glazings.last()
             .map(|v| v.clone()).unwrap_or(Glazing::default());
-        self.glazing.push(Glazing {
+        self.glazings.push(Glazing {
             collection: Some(Collection {
                 address: *collection_key,
                 verified,
             }),
+            instruction_index,
             ..prev
         })
     }
@@ -170,12 +188,22 @@ pub struct TransactionTokenOwnerMeta {
     pub owner_key: Pubkey,
 }
 
+pub struct InstructionContext<'a> {
+    pub instruction: &'a CompiledInstruction,
+
+    pub account_keys: &'a [Pubkey],
+
+    pub owners: &'a [TransactionTokenOwnerMeta],
+
+    pub instruction_index: InstructionIndex,
+}
 
 pub fn update_metadata_instruction(
     bonbon: &mut Bonbon,
-    instruction: &CompiledInstruction,
-    account_keys: &[Pubkey],
-    _owners: &[TransactionTokenOwnerMeta],
+    InstructionContext {
+        instruction, account_keys, owners: _,
+        instruction_index,
+    }: InstructionContext,
 ) -> Result<(), ErrorCode> {
     let get_account_key = |index: usize| account_keys.get(
         usize::from(instruction.accounts[index])
@@ -194,10 +222,11 @@ pub fn update_metadata_instruction(
             }
 
             bonbon.metadata_key = *metadata_key;
-            bonbon.glazing.push(Glazing {
+            bonbon.glazings.push(Glazing {
                 uri: args.data.uri.into_bytes(),
                 creators: from_creators(args.data.creators),
                 collection: None,
+                instruction_index,
             });
         },
         MetadataInstruction::CreateMetadataAccountV2(args) => {
@@ -208,10 +237,11 @@ pub fn update_metadata_instruction(
             }
 
             bonbon.metadata_key = *metadata_key;
-            bonbon.glazing.push(Glazing {
+            bonbon.glazings.push(Glazing {
                 uri: args.data.uri.into_bytes(),
                 creators: from_creators(args.data.creators),
                 collection: args.data.collection.map(Collection::from),
+                instruction_index,
             });
         },
         MetadataInstruction::UpdateMetadataAccount(args) => {
@@ -221,10 +251,11 @@ pub fn update_metadata_instruction(
             }
 
             if let Some(data) = args.data {
-                bonbon.glazing.push(Glazing {
+                bonbon.glazings.push(Glazing {
                     uri: data.uri.into_bytes(),
                     creators: from_creators(data.creators),
                     collection: None,
+                    instruction_index,
                 });
             }
         },
@@ -235,10 +266,11 @@ pub fn update_metadata_instruction(
             }
 
             if let Some(data) = args.data {
-                bonbon.glazing.push(Glazing {
+                bonbon.glazings.push(Glazing {
                     uri: data.uri.into_bytes(),
                     creators: from_creators(data.creators),
                     collection: data.collection.map(Collection::from),
+                    instruction_index,
                 });
             }
         },
@@ -318,7 +350,7 @@ pub fn update_metadata_instruction(
             }
 
             let creator_key = get_account_key(1)?;
-            bonbon.apply_creator_verification(creator_key, true);
+            bonbon.apply_creator_verification(creator_key, true, instruction_index);
         }
         MetadataInstruction::RemoveCreatorVerification => {
             let metadata_key = get_account_key(0)?;
@@ -327,7 +359,7 @@ pub fn update_metadata_instruction(
             }
 
             let creator_key = get_account_key(1)?;
-            bonbon.apply_creator_verification(creator_key, false);
+            bonbon.apply_creator_verification(creator_key, false, instruction_index);
         }
         MetadataInstruction::VerifyCollection => {
             let metadata_key = get_account_key(0)?;
@@ -336,7 +368,7 @@ pub fn update_metadata_instruction(
             }
 
             let collection_key = get_account_key(3)?;
-            bonbon.apply_collection_verification(collection_key, true);
+            bonbon.apply_collection_verification(collection_key, true, instruction_index);
         }
         MetadataInstruction::SetAndVerifyCollection => {
             let metadata_key = get_account_key(0)?;
@@ -345,7 +377,7 @@ pub fn update_metadata_instruction(
             }
 
             let collection_key = get_account_key(4)?;
-            bonbon.apply_collection_verification(collection_key, true);
+            bonbon.apply_collection_verification(collection_key, true, instruction_index);
         }
         MetadataInstruction::UnverifyCollection => {
             let metadata_key = get_account_key(0)?;
@@ -354,7 +386,7 @@ pub fn update_metadata_instruction(
             }
 
             let collection_key = get_account_key(3)?;
-            bonbon.apply_collection_verification(collection_key, true);
+            bonbon.apply_collection_verification(collection_key, true, instruction_index);
         }
         MetadataInstruction::UpdatePrimarySaleHappenedViaToken => { }
         MetadataInstruction::DeprecatedSetReservationList(_) => { }
@@ -377,9 +409,9 @@ pub fn update_metadata_instruction(
 
 pub fn update_token_instruction(
     bonbon: &mut Bonbon,
-    instruction: &CompiledInstruction,
-    account_keys: &[Pubkey],
-    owners: &[TransactionTokenOwnerMeta],
+    InstructionContext {
+        instruction, account_keys, owners, ..
+    }: InstructionContext,
 ) -> Result<(), ErrorCode> {
     let get_account_key = |index: usize| account_keys.get(
         usize::from(instruction.accounts[index])
@@ -453,18 +485,16 @@ pub struct BonbonUpdater {
 
     pub update: fn (
         bonbon: &mut Bonbon,
-        instruction: &CompiledInstruction,
-        account_keys: &[Pubkey],
-        owners: &[TransactionTokenOwnerMeta],
+        instruction_context: InstructionContext,
     ) -> Result<(), ErrorCode>,
 }
 
 impl Bonbon {
     pub fn update(
         &mut self,
-        instruction: &CompiledInstruction,
-        account_keys: &[Pubkey],
-        owners: &[TransactionTokenOwnerMeta],
+        instruction_context @ InstructionContext {
+            instruction, account_keys, ..
+        }: InstructionContext,
         updaters: &[BonbonUpdater],
     ) -> Result<(), ErrorCode> {
         let program_id = account_keys.get(usize::from(instruction.program_id_index))
@@ -472,7 +502,7 @@ impl Bonbon {
 
         if let Some(BonbonUpdater { update, .. }) = updaters.iter().find(
                 |u| u.program_id == *program_id) {
-            update(self, instruction, account_keys, owners)
+            update(self, instruction_context)
         } else {
             Ok(())
         }
