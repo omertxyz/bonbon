@@ -282,8 +282,8 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         for row in instructions {
             let instruction = bincode::deserialize
                 ::<CompiledInstruction>(&row.get::<_, Vec<u8>>(1))?;
-            let keys: Vec<Vec<u8>> = row.get(2);
-            let keys = keys.into_iter().map(|k| Pubkey::new(&k)).collect::<Vec<_>>();
+            let keys: Vec<convert::SqlPubkey> = row.get(2);
+            let keys = keys.into_iter().map(|k| k.0).collect::<Vec<_>>();
 
             match bonbon.update(&instruction, &keys, &updaters) {
                 Ok(_) => {}

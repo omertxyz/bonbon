@@ -31,36 +31,51 @@ impl From<bb::EditionStatus> for EditionStatus {
     }
 }
 
+
 #[derive(Debug)]
-pub struct LimitedEdition {
-    master_key: Pubkey,
+pub struct SqlPubkey(pub Pubkey);
 
-    edition_num: Option<i64>,
-}
-
-impl ToSql for LimitedEdition {
+impl ToSql for SqlPubkey {
     fn to_sql(
         &self,
-        ty: &postgres_types::Type,
+        _ty: &Type,
         w: &mut bytes::BytesMut,
     ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
         use bytes::BufMut;
-        w.put_slice(self.master_key.as_ref());
-        self.edition_num.to_sql(ty, w)?;
+        w.put_slice(self.0.as_ref());
         Ok(IsNull::No)
     }
 
-      fn accepts(ty: &Type) -> bool {
-        return ty.name() == "limited_edition";
-      }
+    postgres_types::accepts!(BYTEA);
 
     postgres_types::to_sql_checked!();
+}
+
+impl<'a> FromSql<'a> for SqlPubkey {
+    fn from_sql(
+        _ty: &Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let fixed: [u8; 32] = raw.try_into()?;
+        Ok(Self(Pubkey::new_from_array(fixed)))
+    }
+
+    postgres_types::accepts!(BYTEA);
+}
+
+
+#[derive(Debug, ToSql, FromSql)]
+#[postgres(name = "limited_edition")]
+pub struct LimitedEdition {
+    master_key: SqlPubkey,
+
+    edition_num: Option<i64>,
 }
 
 impl From<bb::LimitedEdition> for LimitedEdition {
     fn from(e: bb::LimitedEdition) -> Self {
         Self {
-            master_key: e.master_key,
+            master_key: SqlPubkey(e.master_key),
             edition_num: e.edition_num,
         }
     }
