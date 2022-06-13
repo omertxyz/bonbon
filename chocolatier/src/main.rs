@@ -129,7 +129,7 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let select_all_statement = psql_client.prepare(
         "SELECT *
          FROM transactions
-         ORDER_BY (slot, block_index)
+         ORDER BY (slot, block_index)
         ",
     )?;
 
