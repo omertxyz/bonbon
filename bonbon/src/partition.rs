@@ -91,7 +91,7 @@ pub fn partition_token_instruction(
         // didn't show up in pre- or post- balances so could be transient...
         transient_metas.push(TransactionTokenMeta {
             account_index: instruction.accounts[0],
-            decimals: 1, // shouldn't matter...
+            decimals: 0,
             pre_amount: None,
             post_amount: None,
             mint_key: *get_account_key(1)?,
