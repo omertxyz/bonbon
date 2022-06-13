@@ -17,6 +17,8 @@ CREATE TABLE partitions (
   instruction BYTEA
 );
 
+CREATE INDEX by_partition_key ON partitions (partition_key) ;
+
 CREATE TYPE token_meta AS (
   account_index SMALLINT,
   mint_key BYTEA,
