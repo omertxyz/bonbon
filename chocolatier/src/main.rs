@@ -145,11 +145,14 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let params: &[&str] = &[];
+    let query_start = std::time::Instant::now();
     let mut it = psql_client.query_raw(
         &select_all_statement,
         params,
     )?;
+    log::info!("initial query took {:?}", query_start.elapsed());
 
+    let loop_start = std::time::Instant::now();
     while let Some(row) = it.next()? {
         let slot: i64 = row.get(0);
         let block_index: i64 = row.get(1);
@@ -211,6 +214,7 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    log::info!("partitioned in {:?}", loop_start.elapsed());
 
     Ok(())
 }
@@ -253,10 +257,12 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let spl_token_id_encoded = base64::encode(spl_token::id());
     let params: &[&str] = &[&spl_token_id_encoded];
+    let query_start = std::time::Instant::now();
     let mut it = partition_client.query_raw(
         &select_all_token_mints_statement,
         params,
     )?;
+    log::info!("initial query took {:?}", query_start.elapsed());
 
     let updaters = [
         BonbonUpdater {
@@ -269,20 +275,27 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
 
+    let loop_start = std::time::Instant::now();
+    let mut partition_queries = std::time::Duration::ZERO;
+    let mut update_queries = std::time::Duration::ZERO;
+    let mut deserialization_duration = std::time::Duration::ZERO;
     while let Some(row) = it.next()? {
         let mint_key = Pubkey::new(row.get(0));
         let metadata_key = mpl_token_metadata::pda::find_metadata_account(&mint_key).0;
 
         let mint_key_encoded = base64::encode(&mint_key);
         let metadata_key_encoded = base64::encode(&metadata_key);
+        let query_start = std::time::Instant::now();
         let instructions = psql_client.query(
             &select_partition_key,
             &[&mint_key_encoded, &metadata_key_encoded],
         )?;
+        partition_queries += query_start.elapsed();
 
         let mut bonbon = Bonbon::default();
         let mut update_err = None;
         for row in instructions {
+            let deserialization_start = std::time::Instant::now();
             let instruction = bincode::deserialize
                 ::<CompiledInstruction>(&row.get::<_, Vec<u8>>(1))?;
 
@@ -294,6 +307,7 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
                 account_index: m.account_index as u8, // TODO: check?
                 owner_key: m.owner_key.0,
             }).collect::<Vec<_>>();
+            deserialization_duration += deserialization_start.elapsed();
 
             match bonbon.update(&instruction, &keys, &metas, &updaters) {
                 Ok(_) => {}
@@ -315,6 +329,7 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // TODO: more verification on partition_keys?
+        let query_start = std::time::Instant::now();
         psql_client.query(
             &insert_bonbon_statement,
             &[
@@ -350,7 +365,12 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
                 ],
             )?;
         }
+        update_queries += query_start.elapsed();
     }
+    log::info!("reassembled in {:?}", loop_start.elapsed());
+    log::info!("partition queries took {:?}", partition_queries);
+    log::info!("update queries took {:?}", update_queries);
+    log::info!("deserialization marshalling took {:?}", deserialization_duration);
 
     Ok(())
 }
