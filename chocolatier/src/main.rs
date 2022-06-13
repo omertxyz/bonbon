@@ -141,7 +141,7 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let insert_account_keys_statement = insert_client.prepare(
-        "INSERT INTO account_keys VALUES ($1, $2)"
+        "INSERT INTO account_keys VALUES ($1, $2, $3)"
     )?;
 
     let params: &[&str] = &[];
@@ -168,13 +168,16 @@ fn partition(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             .iter().map(|k| k.as_ref().to_vec()).collect::<Vec<_>>();
 
         match partition_transaction(transaction, &partitioners) {
-            Ok(partitioned) => {
+            Ok((partitioned, token_metas)) => {
                 if partitioned.len() != 0 {
                     insert_client.query(
                         &insert_account_keys_statement,
                         &[
                             &signature.as_slice(),
                             &account_keys,
+                            &token_metas.into_iter()
+                                .map(|m| convert::TransactionTokenMeta::from(m))
+                                .collect::<Vec<_>>(),
                         ],
                     )?;
                 }
@@ -228,7 +231,7 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let select_partition_key = psql_client.prepare(
-        "SELECT p.signature, p.instruction, a.keys
+        "SELECT p.signature, p.instruction, a.keys, a.metas
          FROM partitions p JOIN account_keys a ON p.signature = a.signature
          WHERE partition_key = decode($1, 'base64')
             OR partition_key = decode($2, 'base64')
@@ -237,7 +240,7 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let insert_bonbon_statement = psql_client.prepare(
-        "INSERT INTO bonbons VALUES ($1, $2, $3, $4, $5)"
+        "INSERT INTO bonbons VALUES ($1, $2, $3, $4, $5, $6, $7)"
     )?;
 
     let insert_creator_statement = psql_client.prepare(
@@ -277,15 +280,22 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             &[&mint_key_encoded, &metadata_key_encoded],
         )?;
 
-        let mut bonbon = bonbon::assemble::Bonbon::default();
+        let mut bonbon = Bonbon::default();
         let mut update_err = None;
         for row in instructions {
             let instruction = bincode::deserialize
                 ::<CompiledInstruction>(&row.get::<_, Vec<u8>>(1))?;
+
             let keys: Vec<convert::SqlPubkey> = row.get(2);
             let keys = keys.into_iter().map(|k| k.0).collect::<Vec<_>>();
 
-            match bonbon.update(&instruction, &keys, &updaters) {
+            let metas: Vec<convert::TransactionTokenMeta> = row.get(3);
+            let metas = metas.into_iter().map(|m| TransactionTokenOwnerMeta {
+                account_index: m.account_index as u8, // TODO: check?
+                owner_key: m.owner_key.0,
+            }).collect::<Vec<_>>();
+
+            match bonbon.update(&instruction, &keys, &metas, &updaters) {
                 Ok(_) => {}
                 Err(err) => {
                     update_err = Some(err);
@@ -305,12 +315,13 @@ fn reassemble(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // TODO: more verification on partition_keys?
-        trace!("made bonbon {:?}", bonbon);
         psql_client.query(
             &insert_bonbon_statement,
             &[
                 &bonbon.metadata_key.as_ref(),
                 &bonbon.mint_key.as_ref(),
+                &bonbon.current_owner.map(|k| convert::SqlPubkey(k)),
+                &bonbon.current_account.map(|k| convert::SqlPubkey(k)),
                 &convert::EditionStatus::from(bonbon.edition_status),
                 &bonbon.limited_edition.map(convert::LimitedEdition::from),
                 &bonbon.uri,

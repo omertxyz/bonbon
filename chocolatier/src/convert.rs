@@ -1,5 +1,6 @@
 use {
     bonbon::assemble as bb,
+    bonbon::partition as bp,
     postgres_types::*,
     solana_sdk::pubkey::Pubkey,
 };
@@ -77,6 +78,27 @@ impl From<bb::LimitedEdition> for LimitedEdition {
         Self {
             master_key: SqlPubkey(e.master_key),
             edition_num: e.edition_num,
+        }
+    }
+}
+
+
+#[derive(Debug, ToSql, FromSql)]
+#[postgres(name = "token_meta")]
+pub struct TransactionTokenMeta {
+    pub account_index: i16,
+
+    pub mint_key: SqlPubkey,
+
+    pub owner_key: SqlPubkey,
+}
+
+impl From<bp::TransactionTokenMeta> for TransactionTokenMeta {
+    fn from(m: bp::TransactionTokenMeta) -> Self {
+        Self {
+            account_index: m.account_index.into(),
+            mint_key: SqlPubkey(m.mint_key),
+            owner_key: SqlPubkey(m.owner_key),
         }
     }
 }

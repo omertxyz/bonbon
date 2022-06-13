@@ -17,9 +17,16 @@ CREATE TABLE partitions (
   instruction BYTEA
 );
 
+CREATE TYPE token_meta AS (
+  account_index SMALLINT,
+  mint_key BYTEA,
+  owner_key BYTEA
+);
+
 CREATE TABLE account_keys (
   signature BYTEA PRIMARY KEY,
-  keys BYTEA[]
+  keys BYTEA[],
+  metas token_meta[]
 );
 
 
@@ -38,6 +45,8 @@ CREATE TYPE limited_edition AS (
 CREATE TABLE bonbons (
   metadata_key BYTEA NOT NULL,
   mint_key BYTEA NOT NULL,
+  current_owner BYTEA,
+  current_account BYTEA,
   edition_status edition_status NOT NULL,
   limited_edition limited_edition,
   uri BYTEA
